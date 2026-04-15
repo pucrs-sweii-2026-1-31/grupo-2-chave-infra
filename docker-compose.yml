@@ -1,0 +1,106 @@
+services:
+  ministack:
+    image: ministackorg/ministack
+    container_name: ministack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,rds,apigateway,sts
+      - DEBUG=0
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - ministack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_localstack/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  infra-provisioner:
+    image: hashicorp/terraform:latest
+    container_name: infra-provisioner
+    working_dir: /infra
+    volumes:
+      - ./terraform:/infra
+    environment:
+      - TF_VAR_endpoint=http://ministack:4566
+      - TF_VAR_db_name=${DB_NAME:-chave_auth}
+      - TF_VAR_db_user=${DB_USER:-chave}
+      - TF_VAR_db_password=${DB_PASSWORD:-chave_secret}
+      - TF_VAR_ms_auth_port=${MS_AUTH_PORT:-3001}
+    entrypoint: ["/bin/sh", "-c", "rm -f terraform.tfstate terraform.tfstate.backup && terraform init && terraform apply -auto-approve"]
+    depends_on:
+      ministack:
+        condition: service_healthy
+
+  chave-ms-auth:
+    build:
+      context: ../chave-ms-auth
+      dockerfile: Dockerfile
+    container_name: chave-ms-auth
+    ports:
+      - "${MS_AUTH_PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_ENDPOINT=http://ministack:4566
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    depends_on:
+      infra-provisioner:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  chave-mfe-auth:
+    build:
+      context: ../chave-mfe-auth
+      dockerfile: Dockerfile
+    container_name: chave-mfe-auth
+    ports:
+      - "${MFE_AUTH_PORT:-4001}:4001"
+    environment:
+      - VITE_MS_AUTH_URL=http://localhost:3001
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_ENDPOINT=http://ministack:4566
+    depends_on:
+      infra-provisioner:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  chave-shell:
+    build:
+      context: ../chave-shell
+      dockerfile: Dockerfile
+      args:
+        - MFE_AUTH_URL=http://localhost:4001/assets/remoteEntry.js
+    container_name: chave-shell
+    ports:
+      - "${SHELL_PORT:-3000}:3000"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_ENDPOINT=http://ministack:4566
+    depends_on:
+      infra-provisioner:
+        condition: service_completed_successfully
+      chave-mfe-auth:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  ministack_data:
