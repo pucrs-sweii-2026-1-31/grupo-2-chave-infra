@@ -21,6 +21,23 @@ services:
       retries: 10
       start_period: 20s
 
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-chave}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-chave_secret}
+      POSTGRES_DB: ${DB_NAME:-chave_auth}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-chave} -d ${DB_NAME:-chave_auth}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   infra-provisioner:
     image: hashicorp/terraform:latest
     container_name: infra-provisioner
@@ -33,7 +50,7 @@ services:
       - TF_VAR_db_user=${DB_USER:-chave}
       - TF_VAR_db_password=${DB_PASSWORD:-chave_secret}
       - TF_VAR_ms_auth_port=${MS_AUTH_PORT:-3001}
-    entrypoint: ["/bin/sh", "-c", "rm -f terraform.tfstate terraform.tfstate.backup && terraform init && terraform apply -auto-approve"]
+    entrypoint: ["/bin/sh", "-c", "terraform init && terraform apply -auto-approve"]
     depends_on:
       ministack:
         condition: service_healthy
@@ -53,14 +70,16 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
       - AWS_ENDPOINT=http://ministack:4566
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-chave}
+      - DB_PASSWORD=${DB_PASSWORD:-chave_secret}
+      - DB_NAME=${DB_NAME:-chave_auth}
     depends_on:
       infra-provisioner:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   chave-mfe-auth:
@@ -81,12 +100,61 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  chave-ms-survey:
+    build:
+      context: ../ms-survey-service
+      dockerfile: Dockerfile
+    container_name: chave-ms-survey
+    ports:
+      - "${MS_SURVEY_PORT:-3002}:3002"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-chave}
+      - DB_PASSWORD=${DB_PASSWORD:-chave_secret}
+      - DB_NAME=${DB_NAME:-chave_auth}
+      - JWT_SECRET=${JWT_SECRET}
+      - ASSESSMENT_SERVICE_URL=mock
+      - GROUP_SERVICE_URL=mock
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_ENDPOINT=http://ministack:4566
+    depends_on:
+      infra-provisioner:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  chave-mfe-survey:
+    build:
+      context: ../mfe-survey-service
+      dockerfile: Dockerfile
+    container_name: chave-mfe-survey
+    ports:
+      - "${MFE_SURVEY_PORT:-4002}:4002"
+    environment:
+      - VITE_MS_AUTH_URL=http://localhost:3001
+      - VITE_ASSESSMENT_SERVICE_URL=http://localhost:3002/api/v1
+      - VITE_USE_MOCK=false
+      - VITE_SURVEY_SERVICE_URL=http://localhost:3002
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_ENDPOINT=http://ministack:4566
+    depends_on:
+      infra-provisioner:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   chave-shell:
     build:
       context: ../chave-shell
       dockerfile: Dockerfile
       args:
         - MFE_AUTH_URL=http://localhost:4001/assets/remoteEntry.js
+        - MFE_SURVEY_URL=http://localhost:4002/assets/remoteEntry.js
     container_name: chave-shell
     ports:
       - "${SHELL_PORT:-3000}:3000"
@@ -100,7 +168,11 @@ services:
         condition: service_completed_successfully
       chave-mfe-auth:
         condition: service_started
+      chave-mfe-survey:
+        condition: service_started
     restart: unless-stopped
+
 
 volumes:
   ministack_data:
+  postgres_data:
